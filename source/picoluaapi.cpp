@@ -11,11 +11,14 @@ using namespace std;
 #include "logger.h"
 #include "printHelper.h"
 
-//extern "C" {
-  #include <lua.h>
-  #include <lualib.h>
-  #include <lauxlib.h>
-//}
+
+#include <lua.h>
+#include <lualib.h>
+#include <lauxlib.h>
+
+#ifdef ESP_PLATFORM
+#include "esp_log.h"
+#endif
 
 Graphics* _graphicsForLuaApi;
 Input* _inputForLuaApi;
@@ -1195,14 +1198,32 @@ int dset(lua_State *L) {
     return 0;
 }
 
+
+
 int printh(lua_State *L) {
     if (lua_isstring(L, 1)){
         const char * str = "";
-        str = lua_tolstring(L, 1, nullptr);
+        str = lua_tolstring(L, 1, NULL); // nullptr 在 C 语言里是 NULL
+        
+#ifdef ESP_PLATFORM
+        // 使用 ESP_LOGE 确保它是红色高亮且立即输出的
+        ESP_LOGE("P8_LUA", "%s", str);
+#else
         printf("%s\n", str);
+        fflush(stdout); // [关键] 强制刷新缓存
+#endif
     }
     return 0;
 }
+
+// int printh(lua_State *L) {
+//     if (lua_isstring(L, 1)){
+//         const char * str = "";
+//         str = lua_tolstring(L, 1, nullptr);
+//         printf("%s\n", str);
+//     }
+//     return 0;
+// }
 
 int rnd(lua_State *L) {
     if (lua_gettop(L) == 0) {

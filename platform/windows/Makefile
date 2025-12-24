@@ -11,6 +11,8 @@ BUILD		:=	build
 SOURCES		:=	${SOURCES} ../SDL2Common/source source
 INCLUDES	:=	${INCLUDES}
 
+LIBDIRS		:= ../../libs/SDL2-2.30.9/x86_64-w64-mingw32
+
 #---------------------------------------------------------------------------------
 # options for code generation
 #---------------------------------------------------------------------------------
