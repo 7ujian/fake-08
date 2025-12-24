@@ -51,5 +51,5 @@ platform/libretro/obj/
 .DS_Store
 
 platform/esp32/build/
-
+platform/esp32/sdkconfig.old
 *~
