@@ -556,84 +556,50 @@ void Vm::UpdateAndDraw() {
     if (_pauseMenu){
 
         lua_getglobal(_luaState, "__f08_menu_update");
-        if (lua_isfunction(_luaState, -1)) {
-             lua_call(_luaState, 0, 0);
-        } else {
-             lua_pop(_luaState, 1); // 没找到也要弹出!
-        }
-        
+        lua_call(_luaState, 0, 0);
+        lua_pop(_luaState, 0);
+
         lua_getglobal(_luaState, "__f08_menu_draw");
-        if (lua_isfunction(_luaState, -1)) {
-             lua_call(_luaState, 0, 0);
-        } else {
-             lua_pop(_luaState, 1);
-        }
+        lua_call(_luaState, 0, 0);
+        lua_pop(_luaState, 0);
     }
     else{
-        // ====================================================
-        // [关键修复] 正确的 _update / _update60 调用逻辑
-        // ====================================================
-        
-        const char* update_func_name = "_update";
-        
-        // PICO-8 规则：如果 _update60 存在，优先运行，且目标FPS应为60
-        // 如果 Host 已经把 _targetFps 设为 60，说明 _init 时检测到了 _update60
+        // Push the _update function on the top of the lua stack
         if (_targetFps == 60) {
-            update_func_name = "_update60";
-        }
-        
-        // 尝试获取函数
-        lua_getglobal(_luaState, update_func_name);
-
-        // 如果找不到首选函数 (例如 _targetFps=60 但用户没定义 _update60)
-        // 尝试回退到 _update
-        if (!lua_isfunction(_luaState, -1)) {
-            lua_pop(_luaState, 1); // [修复] 弹出之前的 nil/garbage
-            
-            if (_targetFps == 60) {
-                // 如果是 60 模式但没找到 _update60，回退找 _update
+            lua_getglobal(_luaState, "_update60");
+            if (!lua_isfunction(_luaState, -1)) {
                 lua_getglobal(_luaState, "_update");
-            } else {
-                // 如果是 30 模式但没找到 _update，回退找 _update60 (罕见情况)
+            }
+        } else {
+            lua_getglobal(_luaState, "_update");
+            if (!lua_isfunction(_luaState, -1)) {
                 lua_getglobal(_luaState, "_update60");
             }
         }
 
-        // 现在栈顶应该是函数，或者 nil
-        if (lua_isfunction(_luaState, -1)) {
-            // 调用函数 (pcall 会自动弹出函数和参数，并压入结果或错误信息)
-            if (lua_pcall(_luaState, 0, 0, 0)){
-                // 发生错误
-                const char* err = lua_tostring(_luaState, -1);
-                _cartLoadError = err ? err : "Unknown Error";
-                Logger_Write("Error: %s\n", _cartLoadError.c_str());
-                
-                lua_pop(_luaState, 1); // 弹出错误信息
-                QueueCartChange(BiosCartName);
-                return;
-            }
-            // pcall 成功后，栈顶是干净的（除非函数有返回值，但 _update 没有）
-        } else {
-            // 栈顶不是函数，弹出它，保持栈平衡
-            lua_pop(_luaState, 1); 
-        }
-
-        // ====================================================
-        // [关键修复] _draw 调用逻辑
-        // ====================================================
-        lua_getglobal(_luaState, "_draw");
         if (lua_isfunction(_luaState, -1)) {
             if (lua_pcall(_luaState, 0, 0, 0)){
-                const char* err = lua_tostring(_luaState, -1);
-                _cartLoadError = err ? err : "Unknown Error";
-                Logger_Write("Error: %s\n", _cartLoadError.c_str());
+                _cartLoadError = lua_tostring(_luaState, -1);
+                Logger_Write("Error: %s\n", lua_tostring(_luaState, -1));
                 lua_pop(_luaState, 1);
                 QueueCartChange(BiosCartName);
                 return;
             }
-        } else {
-            lua_pop(_luaState, 1); // 没找到 _draw 也要弹出
         }
+        //pop the update fuction off the stack now that we're done with it
+        lua_pop(_luaState, 0);
+
+        lua_getglobal(_luaState, "_draw");
+        if (lua_isfunction(_luaState, -1)) {
+            if (lua_pcall(_luaState, 0, 0, 0)){
+                _cartLoadError = lua_tostring(_luaState, -1);
+                Logger_Write("Error: %s\n", lua_tostring(_luaState, -1));
+                lua_pop(_luaState, 1);
+                QueueCartChange(BiosCartName);
+                return;
+            }
+        }
+        lua_pop(_luaState, 0);
 
         if (_input->btnp(6)) {
             togglePauseMenu();

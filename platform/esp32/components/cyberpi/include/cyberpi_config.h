@@ -33,13 +33,9 @@
 // ==========================================
 // 2. AW9523B 扩展芯片配置
 // ==========================================
+// 两个芯片地址
 #define AW9523B_ADDR_LCD    0x58 
-
-// LCD 控制线在 AW9523B 的 Port 1
-#define AW_LCD_PORT         1  // Port 1
-#define AW_LCD_DC_PIN       4  // P1_4 -> Data/Command
-#define AW_LCD_RST_PIN      5  // P1_5 -> Reset
-#define AW_LCD_BL_PIN       7  // P1_7 -> Backlight
+#define AW9523B_ADDR_INPUT  0x5B
 
 // ==========================================
 // 3. 屏幕参数 (ST7735 128x128)
@@ -50,4 +46,27 @@
 // [修正] 基于 CyberPi_Config.h 的 Offset 设置
 // X=3, Y=2 是 CyberPi 定制屏幕的特征
 #define LCD_OFFSET_X        3
-#define LCD_OFFSET_Y        2
+#define LCD_OFFSET_Y        3
+
+// LCD 控制线在 AW9523B 的 Port 1
+#define AW_LCD_PORT         1  // Port 1
+#define AW_LCD_DC_PIN       4  // P1_4 -> Data/Command
+#define AW_LCD_RST_PIN      5  // P1_5 -> Reset
+#define AW_LCD_BL_PIN       7  // P1_7 -> Backlight
+
+// ==========================================
+// 4. 输入按键映射 (基于提供的硬件定义)
+// ==========================================
+// 我们将 Port 0 映射为 bit 0-7, Port 1 映射为 bit 8-15
+
+// Port 0 Pins
+#define CYBERPI_KEY_LEFT    0   // AW_P0_0
+#define CYBERPI_KEY_UP      1   // AW_P0_1
+#define CYBERPI_KEY_RIGHT   2   // AW_P0_2
+#define CYBERPI_KEY_CENTER  3   // AW_P0_3 (Joystick Press)
+#define CYBERPI_KEY_DOWN    4   // AW_P0_4
+#define CYBERPI_KEY_B       5   // AW_P0_5
+#define CYBERPI_KEY_A       6   // AW_P0_6
+
+// Port 1 Pins (索引 = 8 + Pin号)
+#define CYBERPI_KEY_MENU    8   // AW_P1_0 -> 8 + 0 = 8

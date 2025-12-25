@@ -18,6 +18,7 @@ static const char* TAG = "ST7735";
 
 ST7735::ST7735(spi_device_handle_t spi, AW9523B* io) 
     : _spi(spi), _io(io) {
+    // 构造函数先赋默认值，具体旋转逻辑在 init 中可能需要调整
     _colstart = LCD_OFFSET_X; 
     _rowstart = LCD_OFFSET_Y; 
 }
@@ -71,9 +72,27 @@ void ST7735::init() {
     sendCmd(0xC4); sendData((uint8_t[]){0x8A, 0xEE}, 2);
     sendCmd(0xC5); sendData((uint8_t[]){0x0E}, 1);
 
-    // MADCTL: BGR (0xC0) or RGB (0xC8). Try 0xC0 first for CyberPi.
-    sendCmd(0x36); sendData((uint8_t[]){0xC0}, 1);
+    // =================================================================
+    // [修改] 旋转设置 (MADCTL 0x36)
+    // 原值: 0xC0 (MX=1, MY=1, MV=0) -> Portrait
+    // 目标: Landscape (90度顺时针)
+    // 常用值: 
+    //   0xA0 (MY=1, MV=1, MX=0, RGB=0) -> Landscape
+    //   0x60 (MV=1, MX=1, MY=0, RGB=0) -> Landscape (180度翻转)
+    //   0x70 (MV=1, MX=1, MY=1, RGB=0) -> 也就是 X/Y 交换且翻转
+    //
+    // 这里我们使用 0xA0 作为标准的 Landscape。
+    // 如果发现颜色反了(红变蓝)，把 0xA0 改为 0xA8 (RGB bit)。
+    // 如果发现方向是反的(270度)，尝试改为 0x60。
+    // =================================================================
+    sendCmd(0x36); sendData((uint8_t[]){0xA0}, 1); 
 
+    // [重要] 旋转后，行列偏移量通常需要交换
+    // 如果画面没有居中（比如上方或左边有杂色/黑边），请尝试交换下面的赋值，
+    // 或者直接手动调整这里的数值。
+    _colstart = LCD_OFFSET_Y; 
+    _rowstart = LCD_OFFSET_X;
+    
     // COLMOD: 16-bit
     sendCmd(0x3A); sendData((uint8_t[]){0x05}, 1);
 
@@ -93,6 +112,8 @@ void ST7735::init() {
     static uint16_t blackBuf[128]; // 256 bytes, safe for DMA
     memset(blackBuf, 0, sizeof(blackBuf));
     
+    // 注意：旋转后 LCD_WIDTH 和 LCD_HEIGHT 的含义在硬件上交换了，
+    // 但我们的宏定义 (128x128) 没变，所以清屏逻辑依然适用。
     sendCmd(0x2A); 
     uint8_t x[] = {0, 0, 0, 127}; sendData(x, 4);
     sendCmd(0x2B); 
