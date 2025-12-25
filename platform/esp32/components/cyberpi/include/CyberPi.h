@@ -6,26 +6,26 @@
 #include "driver/gpio.h"
 #include "driver/spi_master.h"
 
-
 class CyberPi {
 public:
-    // 单例访问
+    // 单例模式获取实例
     static CyberPi& getInstance();
     
-    // 初始化系统 (I2C, SPI, 扩展芯片配置, LCD)
+    // 系统初始化：配置 I2C/SPI, AW9523B 混合模式, 初始化 LCD
     void init();
 
-    // 绘制屏幕 (推送到 ST7735)
+    // 绘制屏幕缓冲区 (RGB565)
     void render(const uint16_t* frameBuffer);
 
-    // [核心] 每帧调用一次，通过 I2C 读取并缓存按键状态
+    // 每帧调用，通过 I2C 读取 AW9523B 状态并缓存
     void updateInputState();
-
-    // [核心] 查询某个按键是否按下 (基于 updateInputState 的缓存结果)
-    // pin_index: 0-15 (0-7 for Port0, 8-15 for Port1)
+    
+    // 查询按键状态 (基于 updateInputState 的缓存结果)
+    // pin_index: 0-7 (Port 0), 8-15 (Port 1)
+    // 推荐使用 config 中的 CYBERPI_KEY_* 宏
     bool isButtonPressed(uint8_t pin_index);
 
-    // 获取扩展芯片指针 (如果其他模块需要直接操作 IO)
+    // 获取扩展芯片对象指针
     AW9523B* getIoExpander() { return _io_expander; }
 
 private:
@@ -33,15 +33,13 @@ private:
     CyberPi(const CyberPi&) = delete;
     CyberPi& operator=(const CyberPi&) = delete;
 
-    // 硬件实例
-    AW9523B* _io_expander; // 地址 0x58
+    AW9523B* _io_expander; 
     ST7735* _lcd;
     spi_device_handle_t _spi_handle;
 
-    // 输入状态缓存 (16位: Low Byte=Port0, High Byte=Port1)
+    // 输入状态缓存 (16位: 低8位=Port0, 高8位=Port1)
     uint16_t _cached_input_state; 
 
-    // 内部初始化函数
     void initI2C();
     void initSPI();
 };

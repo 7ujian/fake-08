@@ -4,14 +4,23 @@
 
 static const char* TAG = "CyberPi";
 
-// ==========================================
-//    构造函数 & 单例
-// ==========================================
+// AW9523B 寄存器地址
+#define REG_INPUT_P0        0x00
+#define REG_INPUT_P1        0x01
+#define REG_OUTPUT_P0       0x02
+#define REG_OUTPUT_P1       0x03
+#define REG_CONFIG_P0       0x04 // 0=Output, 1=Input
+#define REG_CONFIG_P1       0x05
+#define REG_CTRL            0x11 // GCR
+#define REG_WORK_MODE_P0    0x12 // 0=GPIO, 1=LED
+#define REG_WORK_MODE_P1    0x13
+#define REG_SWRST           0x7F
+
 CyberPi::CyberPi() : 
     _io_expander(nullptr), 
     _lcd(nullptr), 
     _spi_handle(nullptr),
-    _cached_input_state(0xFFFF) 
+    _cached_input_state(0xFFFF) // 默认未按下 (High)
 {}
 
 CyberPi& CyberPi::getInstance() {
@@ -19,55 +28,64 @@ CyberPi& CyberPi::getInstance() {
     return instance;
 }
 
-// ==========================================
-//    初始化流程 (修复黑屏 + 输入)
-// ==========================================
 void CyberPi::init() {
-    ESP_LOGI(TAG, ">>> CyberPi System Init (LCD Fix + Input) <<<");
+    ESP_LOGI(TAG, ">>> CyberPi Init (Config Driven) <<<");
 
     initI2C();
     initSPI();
 
-    // 1. 初始化 AW9523B 对象
-    // 我们先创建对象，让它建立基础连接
+    // 创建 AW9523B 对象 (仅用于封装，底层配置下文手动完成)
     _io_expander = new AW9523B(CYBERPI_I2C_PORT, AW9523B_ADDR_LCD);
-    
-    // 2. [关键修复] 手动配置混合模式
-    // 必须确保背光 (BL) 和复位 (RST) 在初始化时处于高电平
-    // --------------------------------------------------------
-    ESP_LOGI(TAG, "Configuring AW9523B Registers...");
+
+    // ============================================================
+    // AW9523B 手动初始化序列 (解决黑屏和按键问题)
+    // ============================================================
+    ESP_LOGI(TAG, "Configuring AW9523B (0x%02X)...", AW9523B_ADDR_LCD);
     
     i2c_cmd_handle_t cmd = i2c_cmd_link_create();
     i2c_master_start(cmd);
     i2c_master_write_byte(cmd, (AW9523B_ADDR_LCD << 1) | I2C_MASTER_WRITE, true);
 
-    // [A] 退出 LED 模式，进入 GPIO 模式 (Reg 0x12, 0x13)
-    i2c_master_write_byte(cmd, 0x12, true);
-    i2c_master_write_byte(cmd, 0x00, true); // P0 GPIO
-    i2c_master_write_byte(cmd, 0x00, true); // P1 GPIO
+    // 1. 软件复位 (Soft Reset)
+    i2c_master_write_byte(cmd, REG_SWRST, true);
+    i2c_master_write_byte(cmd, 0x00, true);
 
-    // [B] 预置输出电平 (Reg 0x02, 0x03) -> 必须先做这个！
-    // 如果先设方向再设电平，可能会瞬间拉低 RST 导致白屏/黑屏
-    // 我们将所有端口预置为 1 (High)。
-    // 对于 Output: BL=On, RST=Inactive, DC=Data, AMP=On
-    // 对于 Input: 开启弱上拉或无效
-    i2c_master_write_byte(cmd, 0x02, true);
-    i2c_master_write_byte(cmd, 0xFF, true); // Port 0: All High
-    i2c_master_write_byte(cmd, 0xFF, true); // Port 1: All High (BL/RST/DC = 1)
+    // 2. 设置推挽输出 (Push-Pull) - 增强 LCD 信号驱动能力
+    i2c_master_write_byte(cmd, REG_CTRL, true);
+    i2c_master_write_byte(cmd, 0x10, true); 
 
-    // [C] 配置输入输出方向 (Reg 0x04, 0x05)
-    // 0 = Output, 1 = Input
-    i2c_master_write_byte(cmd, 0x04, true); 
+    // 3. 强制进入 GPIO 模式 (关闭 LED 扩展模式)
+    i2c_master_write_byte(cmd, REG_WORK_MODE_P0, true);
+    i2c_master_write_byte(cmd, 0x00, true);
+    i2c_master_write_byte(cmd, 0x00, true);
+
+    // 4. [关键] 预置输出电平为 HIGH
+    // 必须在设置 Direction 之前执行，防止 Output 变为 Low 拉低 LCD 控制线
+    i2c_master_write_byte(cmd, REG_OUTPUT_P0, true);
+    i2c_master_write_byte(cmd, 0xFF, true); // Port 0: 释放 Input 线 (Open Drain safe)
+    i2c_master_write_byte(cmd, 0xFF, true); // Port 1: BL=1(亮), RST=1(不复位), DC=1
+
+    // 5. 配置 IO 方向 (0=Output, 1=Input)
+    i2c_master_write_byte(cmd, REG_CONFIG_P0, true);
     
-    // Port 0: 全是游戏按键 -> 0xFF (Input)
+    // --- Port 0 配置 ---
+    // 所有游戏按键 (Left, Up, Right, Center, Down, A, B) 都在 Port 0
+    // 全部设为 Input (0xFF)
     i2c_master_write_byte(cmd, 0xFF, true); 
     
-    // Port 1: 混合模式
-    // Menu(0)=Input(1)
-    // AMP(3), DC(4), RST(5), BL(7) = Output(0)
-    // Unused(1,2,6) = Input(1)
-    // Val: 0100 0111 -> 0x47
-    i2c_master_write_byte(cmd, 0x47, true); 
+    // --- Port 1 配置 (混合模式) ---
+    // Output: AMP(3), DC(4), RST(5), BL(7) -> bit=0
+    // Input:  Menu(0) -> bit=1
+    // Unused: 1, 2, 6 -> 设为 1 (Input) 安全
+    
+    uint8_t p1_config = 0xFF;
+    p1_config &= ~(1 << AW_AMP_EN_PIN); // Output
+    p1_config &= ~(1 << AW_LCD_DC_PIN); // Output
+    p1_config &= ~(1 << AW_LCD_RST_PIN);// Output
+    p1_config &= ~(1 << AW_LCD_BL_PIN); // Output
+    // 此时 Menu(Bit 0) 依然是 1 (Input)
+    
+    i2c_master_write_byte(cmd, p1_config, true); // 写入配置 (约为 0x47)
 
     i2c_master_stop(cmd);
     
@@ -75,35 +93,23 @@ void CyberPi::init() {
     i2c_cmd_link_delete(cmd);
 
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "AW9523B Config Failed! Screen may not light up.");
+        ESP_LOGE(TAG, "AW9523B Init Failed! I2C Error: %d", ret);
     } else {
-        ESP_LOGI(TAG, "AW9523B Configured: BL On, Inputs Ready.");
+        ESP_LOGI(TAG, "AW9523B Configured. P1 Config Mask: 0x%02X", p1_config);
     }
 
-    // 3. 再次确认背光开启 (通过对象接口双重保险)
-    if (_io_expander) {
-        // AW_LCD_BL_PIN 是 7 (P1_7)
-        // 注意：AW9523B 库可能需要知道我们是在操作 Port 1
-        // 假设库的 pinMode/digitalWrite 处理了端口逻辑
-        // 如果库比较简单，可能需要传递 8+7=15，或者直接调用
-        
-        // 既然我们上面手动写寄存器已经拉高了，这里主要为了同步 internal state
-        // 暂时不调用库函数以免覆盖配置，ST7735 init 会接管 RST/DC
-    }
-
-    // 4. 初始化 ST7735 LCD
+    // 4. 初始化 LCD
     if (_spi_handle && _io_expander) {
         ESP_LOGI(TAG, "Initializing ST7735...");
         _lcd = new ST7735(_spi_handle, _io_expander);
         if (_lcd) {
             _lcd->init();
-            // init 内部会 toggle RST，如果方向配置对了，这里应该能正常复位
         }
     }
 }
 
 // ==========================================
-//    输入处理逻辑 (保持不变，已验证逻辑正确)
+// 输入读取逻辑 (符合 Active Low)
 // ==========================================
 void CyberPi::updateInputState() {
     if (!_io_expander) return;
@@ -113,28 +119,28 @@ void CyberPi::updateInputState() {
     i2c_cmd_handle_t cmd = i2c_cmd_link_create();
     i2c_master_start(cmd);
     i2c_master_write_byte(cmd, (AW9523B_ADDR_LCD << 1) | I2C_MASTER_WRITE, true);
-    i2c_master_write_byte(cmd, 0x00, true); // Reg 0x00
+    i2c_master_write_byte(cmd, REG_INPUT_P0, true); // 从 P0 Input 开始读
     
     i2c_master_start(cmd);
     i2c_master_write_byte(cmd, (AW9523B_ADDR_LCD << 1) | I2C_MASTER_READ, true);
-    i2c_master_read(cmd, data, 2, I2C_MASTER_LAST_NACK);
+    i2c_master_read(cmd, data, 2, I2C_MASTER_LAST_NACK); // 连续读 P0, P1
     i2c_master_stop(cmd);
     
     esp_err_t ret = i2c_master_cmd_begin(CYBERPI_I2C_PORT, cmd, pdMS_TO_TICKS(10));
     i2c_cmd_link_delete(cmd);
 
     if (ret == ESP_OK) {
-        // Low Byte=P0, High Byte=P1
+        // data[0] 是 Port 0, data[1] 是 Port 1
         _cached_input_state = data[0] | (data[1] << 8);
     }
 }
 
 bool CyberPi::isButtonPressed(uint8_t pin_index) {
-    // 0 = Pressed, 1 = Released
-    return !((_cached_input_state >> pin_index) & 1);
+    // 硬件逻辑: 按下 = 低电平(0), 松开 = 高电平(1)
+    bool val = (_cached_input_state >> pin_index) & 1;
+    return !val; // 如果读到 0，返回 true (Pressed)
 }
 
-// ... render, initI2C, initSPI 保持不变 ...
 void CyberPi::render(const uint16_t* frameBuffer) {
     if (_lcd) _lcd->drawBitmap(frameBuffer);
 }
@@ -162,6 +168,7 @@ void CyberPi::initSPI() {
     buscfg.quadhd_io_num = -1;
     buscfg.max_transfer_sz = 4092; 
     ESP_ERROR_CHECK(spi_bus_initialize(CYBERPI_SPI_HOST, &buscfg, SPI_DMA_CH_AUTO));
+
     spi_device_interface_config_t devcfg = {};
     devcfg.clock_speed_hz = 20 * 1000 * 1000;
     devcfg.mode = 0; 
