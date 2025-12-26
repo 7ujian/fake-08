@@ -87,6 +87,12 @@ idf_component_register(
         # 如果使用 S3，可能需要显式引入 log 组件
         log 
         cyberpi
+    
+    EMBED_TXTFILES 
+        "../../../test/carts/boldtexttest.p8"
+        "carts/bunnysurvivor.p8"
+        "carts/cpu_test.p8"
+        "carts/rom_test.p8"
 )
 
 # 3. [核心操作] 强制将 z8lua 和 miniz 的 .c 文件视为 C++ 编译

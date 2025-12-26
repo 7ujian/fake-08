@@ -1,58 +1,123 @@
 /* platform/esp32/main/Host_Implementation.cpp */
 
-#include "host.h"         
-#include "CyberPi.h"    
-#include "esp_timer.h"
+#include "Host.h"
+#include "CyberPi.h"
+#include "esp_heap_caps.h"
+#include "esp_log.h"
+#include <cstring>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include <cstring>
-#include <math.h> 
+#include "esp_timer.h"
+#include "cyberpi_config.h" 
 
 // ==========================================
-// 静态状态管理
+// 1. 静态全局资源
 // ==========================================
 
-static int g_targetFps = 60;
-static int64_t g_lastFrameTime = 0;
-static int64_t g_frameDurationUs = 16666;
-
-#define AUDIO_BUF_SIZE 1024
-static int16_t g_audioBuffer[AUDIO_BUF_SIZE * 2]; 
-//static uint16_t g_lineBuffer[128 * 128];
 static uint16_t* g_lineBuffer = nullptr;
 
+// 帧率控制
+static int64_t s_lastFrameTime = 0;
+static int64_t s_frameDurationUs = 16666; 
+
+// FPS 统计
+static bool    s_showFps = DEFAULT_SHOW_FPS; 
+static int     s_currentFps = 0;
+static int     s_frameCount = 0;
+static int64_t s_fpsTimer = 0;
+
+// 输入状态缓存 (用于实现 KDown/btnp 的上升沿检测)
+static uint8_t s_lastHeldState = 0; 
+
+// 音频缓冲区
+#define AUDIO_BUF_SIZE 1024
+static int16_t g_audioBuffer[AUDIO_BUF_SIZE * 2]; 
+
 // ==========================================
-// 平台特定实现 (Partial Implementation)
+// 2. 静态辅助函数
+// ==========================================
+
+// 极简 3x5 数字字体
+static const uint8_t MINI_DIGITS[10][3] = {
+    {0x1F, 0x11, 0x1F}, // 0
+    {0x00, 0x1F, 0x00}, // 1
+    {0x1D, 0x15, 0x17}, // 2
+    {0x15, 0x15, 0x1F}, // 3
+    {0x07, 0x04, 0x1F}, // 4
+    {0x17, 0x15, 0x1D}, // 5
+    {0x1F, 0x15, 0x1D}, // 6
+    {0x01, 0x01, 0x1F}, // 7
+    {0x1F, 0x15, 0x1F}, // 8
+    {0x17, 0x15, 0x1F}  // 9
+};
+
+// 在显存中绘制数字
+static void drawFpsNumber(int x, int y, int num, uint16_t color, uint16_t* buffer) {
+    // 1. 安全边界检查：防止负数导致数组越界 (Crash来源之一)
+    if (num < 0) num = 0; 
+    if (num > 99) num = 99;
+
+    int digits[2] = {num / 10, num % 10};
+    int currentX = x;
+
+    for (int d = 0; d < 2; d++) {
+        int digit = digits[d];
+        // 去掉前导零 (如果是十位且是0，跳过绘制，只移动光标)
+        if (d == 0 && digit == 0) { 
+            currentX += 4; 
+            continue; 
+        } 
+
+        for (int col = 0; col < 3; col++) {
+            uint8_t colData = MINI_DIGITS[digit][col];
+            for (int row = 0; row < 5; row++) {
+                // 判断当前位是否为 1
+                if ((colData >> row) & 0x01) {
+                    int px = currentX + col;
+                    
+                    // [修正点] 之前是 y + (4 - row)，导致上下颠倒
+                    // 现在改为 y + row，确保 Bit 0 画在最上面
+                    int py = y + row; 
+                    
+                    if (px >= 0 && px < 128 && py >= 0 && py < 128) {
+                        buffer[py * 128 + px] = color;
+                    }
+                }
+            }
+        }
+        currentX += 4; // 数字间隔
+    }
+}
+
+inline uint8_t getPixelNibble(int x, int y, const uint8_t* picoFb) {
+    int index = (y * 64) + (x >> 1);
+    uint8_t byte = picoFb[index];
+    return (x & 1) ? (byte >> 4) : (byte & 0x0F);
+}
+
+// ==========================================
+// 3. Host 类实现
 // ==========================================
 
 Host::Host() : 
-    // 初始化成员变量 (参考 host.h 中的默认值)
     currKDown(0), currKHeld(0), currKBDown(false), currKBKey(""),
     lDown(false), rDown(false), stretchKeyPressed(false),
     stretch(PixelPerfectStretch), kbmode(Emoji), resizekey(NoResize),
     menustyle(Fancy), bgcolor(Gray),
     scaleX(1.0), scaleY(1.0), mouseOffsetX(0), mouseOffsetY(0), quit(0)
 {
-    g_lastFrameTime = esp_timer_get_time();
+    setUpPaletteColors();
+    s_lastFrameTime = esp_timer_get_time();
+    s_fpsTimer = s_lastFrameTime;
 
     if (g_lineBuffer == nullptr) {
-        g_lineBuffer = new uint16_t[128 * 128];
-        // 简单检查一下内存是否分配成功
-        if (g_lineBuffer == nullptr) {
-            printf("CRITICAL ERROR: Failed to allocate video buffer!\n");
-        } else {
-            printf("Video buffer allocated successfully.\n");
+        size_t bufSize = 128 * 128 * sizeof(uint16_t);
+        g_lineBuffer = (uint16_t*)heap_caps_malloc(bufSize, MALLOC_CAP_8BIT);
+        if (g_lineBuffer) {
+            memset(g_lineBuffer, 0, bufSize);
         }
     }
 }
-
-// 即使 hostCommonFunctions.cpp 没实现析构，这里也要有
-// 如果链接报错 multiple def，就注释掉
-// 通常 host.h 里没有虚析构函数的实现，所以这里需要
-// 除非 hostCommonFunctions.cpp 里有 (我看源码是没有的)
-// Host::~Host() {} 
-// 注意：如果编译报 undefined reference to vtable，说明必须提供析构函数体
-// 但 host.h 里并没有把析构声明为 virtual，所以不需要 vtable
 
 // 系统接口
 const char* Host::logFilePrefix() { return ""; }
@@ -63,175 +128,137 @@ bool Host::shouldQuit() { return false; }
 // 帧率控制
 void Host::setTargetFps(int fps) {
     if (fps <= 0) fps = 30;
-    g_targetFps = fps;
-    g_frameDurationUs = 1000000 / fps;
+    s_frameDurationUs = 1000000 / fps;
 }
 
 void Host::waitForTargetFps() {
     int64_t now = esp_timer_get_time();
-    int64_t elapsed = now - g_lastFrameTime;
-    int64_t time_to_wait = g_frameDurationUs - elapsed;
+    
+    // FPS 统计
+    s_frameCount++;
+    if (now - s_fpsTimer >= 1000000) {
+        s_currentFps = s_frameCount;
+        s_frameCount = 0;
+        s_fpsTimer = now;
+    }
+
+    // // 延时逻辑
+    // if (s_lastFrameTime == 0) {
+    //     s_lastFrameTime = now;
+    //     return;
+    // }
+
+    int64_t elapsed = now - s_lastFrameTime;
+    int64_t time_to_wait = s_frameDurationUs - elapsed;
 
     if (time_to_wait > 0) {
-        if (time_to_wait > 2000) {
-            vTaskDelay(pdMS_TO_TICKS(time_to_wait / 1000));
-        }
-        while ((esp_timer_get_time() - g_lastFrameTime) < g_frameDurationUs) {
-            asm volatile("nop");
-        }
+        uint32_t ms = time_to_wait / 1000;
+        if (ms == 0) ms = 1;
+        vTaskDelay(pdMS_TO_TICKS(ms));
+    } else {
+        vTaskDelay(1);
     }
-    g_lastFrameTime = esp_timer_get_time();
+    
+    s_lastFrameTime = now;
 }
 
 double Host::deltaTMs() {
-    return g_frameDurationUs / 1000.0;
+    return s_frameDurationUs / 1000.0;
 }
 
 // 屏幕
 void Host::changeStretch() {}
 void Host::forceStretch(StretchOption opt) {}
 
-// 在 drawFrame 函数之前添加这个 helper，或者作为类的私有函数
-// PICO-8 内存布局: 低4位是左像素(偶数X)，高4位是右像素(奇数X)
-inline uint8_t getPixelNibble(int x, int y, const uint8_t* picoFb) {
-    // 128 像素宽 = 64 字节宽
-    // y * 64 找到行首，x / 2 找到列字节
-    int index = (y * 64) + (x >> 1);
-    uint8_t byte = picoFb[index];
-    
-    // 如果 x 是奇数 (x&1)，取高 4 位；如果是偶数，取低 4 位
-    return (x & 1) ? (byte >> 4) : (byte & 0x0F);
-}
-
 void Host::drawFrame(uint8_t* picoFb, uint8_t* screenPaletteMap, uint8_t drawMode) {
-    // 安全检查
     if (!g_lineBuffer) return;
 
-    // 获取 fake08 内置的 RGB888 调色板
     Color* basePalette = GetPaletteColors(); 
-
-    // [性能优化] 预计算当前帧的 16 色 RGB565 查找表
-    // 这样我们只需要做 16 次 RGB转换，而不是 16384 次
     uint16_t paletteLut[16];
 
     for (int i = 0; i < 16; i++) {
-        // 处理 PICO-8 的 pal() 指令映射 (screenPaletteMap)
-        // SDL 代码里也是这样做的: _paletteColors[screenPaletteMap[c]]
-        uint8_t mappedIdx = screenPaletteMap[i] & 0x0F; // 限制在 0-15
-        
+        uint8_t mappedIdx = screenPaletteMap[i] & 0x0F; 
         Color c = basePalette[mappedIdx];
-
-        // RGB888 (Color struct) -> RGB565 (uint16_t)
-        // 转换公式: R(5) << 11 | G(6) << 5 | B(5)
         uint16_t color565 = ((c.Red & 0xF8) << 8) | ((c.Green & 0xFC) << 3) | (c.Blue >> 3);
-
-        // [重要] 字节序交换 (Endian Swap)
-        // ESP32 的 SPI 通常需要大端序发送 (High byte first)
-        // 将 0xRRGG 变成 0xGGRR
         paletteLut[i] = (color565 >> 8) | (color565 << 8);
     }
 
-    // 像素填充循环
     int pixelIdx = 0;
-    
-    // 注意：PICO-8 标准分辨率是 128x128
-    // 你的 SDL 代码用了 PicoScreenHeight/Width，这里直接用 128 以简化
     for (int y = 0; y < 128; y++) {
         for (int x = 0; x < 128; x++) {
-            // [关键修正] 使用 getPixelNibble 解包 4-bit 像素
             uint8_t colorIdx = getPixelNibble(x, y, picoFb);
-            
-            // 查表并写入
             g_lineBuffer[pixelIdx++] = paletteLut[colorIdx];
         }
     }
 
-    // 推送给 CyberPi 硬件
+    // [修改点 1] 绘制 FPS 到右上角
+    if (s_showFps) {
+        uint16_t color = 0xE007; 
+        if (s_currentFps < 28) color = 0x00F8; 
+        // x=119: 128 - (4*2) - 1 = 119 (留出2个数字的宽度)
+        drawFpsNumber(119, 1, s_currentFps, color, g_lineBuffer);
+    }
+
     CyberPi::getInstance().render(g_lineBuffer);
 }
+
 // 音频
 bool Host::shouldFillAudioBuff() { return false; }
 void* Host::getAudioBufferPointer() { return g_audioBuffer; }
 size_t Host::getAudioBufferSize() { return sizeof(g_audioBuffer); }
-void Host::playFilledAudioBuffer() { /* I2S Write */ }
+void Host::playFilledAudioBuffer() { }
 
 // 初始化
 void Host::oneTimeSetup(Audio* audio) {
-    // 调用通用实现来初始化调色板数据
     setUpPaletteColors(); 
 }
 void Host::oneTimeCleanup() {}
 void Host::setPlatformParams(int, int, uint32_t, uint32_t, uint32_t, std::string, std::string, std::string) {}
-
-// 文件系统
 std::string Host::getCartDirectory() { return ""; }
 std::vector<std::string> Host::listcarts() { return {}; }
+std::string Host::customBiosLua() { return ""; }
 
-// 输入
+// [修改点 2] 输入逻辑修正
 InputState_t Host::scanInput() {
     InputState_t state = {};
     
-    // 1. 初始化清零
+    // 清空状态
     state.KDown = 0;
     state.KHeld = 0;
-    state.mouseX = 0;
-    state.mouseY = 0;
-    state.mouseBtnState = 0;
-    state.KBdown = false;
-    state.KBkey = "";
+    // ... 鼠标状态省略，CyberPi暂无 ...
 
-    // 2. 驱动层刷新：通过 I2C 读取 AW9523B 状态
+    // 1. 读取硬件 I2C
     CyberPi& device = CyberPi::getInstance();
     device.updateInputState();
 
-    // 3. 映射逻辑：物理按键 -> PICO-8 标准位掩码
+    // 2. 构建当前帧的按键掩码 (Current Held Mask)
+    uint8_t currentHeld = 0;
+
+    if (device.isButtonPressed(CYBERPI_KEY_LEFT))   currentHeld |= P8_KEY_LEFT;
+    if (device.isButtonPressed(CYBERPI_KEY_RIGHT))  currentHeld |= P8_KEY_RIGHT;
+    if (device.isButtonPressed(CYBERPI_KEY_UP))     currentHeld |= P8_KEY_UP;
+    if (device.isButtonPressed(CYBERPI_KEY_DOWN))   currentHeld |= P8_KEY_DOWN;
     
-    // --- 方向键 ---
-    if (device.isButtonPressed(CYBERPI_KEY_LEFT)) {
-        state.KDown |= P8_KEY_LEFT;
-        state.KHeld |= P8_KEY_LEFT;
-    }
-    if (device.isButtonPressed(CYBERPI_KEY_RIGHT)) {
-        state.KDown |= P8_KEY_RIGHT;
-        state.KHeld |= P8_KEY_RIGHT;
-    }
-    if (device.isButtonPressed(CYBERPI_KEY_UP)) {
-        state.KDown |= P8_KEY_UP;
-        state.KHeld |= P8_KEY_UP;
-    }
-    if (device.isButtonPressed(CYBERPI_KEY_DOWN)) {
-        state.KDown |= P8_KEY_DOWN;
-        state.KHeld |= P8_KEY_DOWN;
-    }
-
-    // --- 动作键 ---
-    // 物理 A -> PICO-8 O 键 (Button 4)
-    if (device.isButtonPressed(CYBERPI_KEY_A)) {
-        state.KDown |= P8_KEY_O;
-        state.KHeld |= P8_KEY_O;
-    }
+    // A 键和摇杆中键都映射为 O
+    if (device.isButtonPressed(CYBERPI_KEY_A) || 
+        device.isButtonPressed(CYBERPI_KEY_CENTER)) currentHeld |= P8_KEY_O;
+        
+    // B 键映射为 X
+    if (device.isButtonPressed(CYBERPI_KEY_B))      currentHeld |= P8_KEY_X;
     
-    // 摇杆中键 -> 也可以映射为 O 键 (确认)
-    if (device.isButtonPressed(CYBERPI_KEY_CENTER)) {
-        state.KDown |= P8_KEY_O;
-        state.KHeld |= P8_KEY_O;
-    }
+    // Menu 键映射为 Pause
+    if (device.isButtonPressed(CYBERPI_KEY_MENU))   currentHeld |= P8_KEY_PAUSE;
 
-    // 物理 B -> PICO-8 X 键 (Button 5)
-    if (device.isButtonPressed(CYBERPI_KEY_B)) {
-        state.KDown |= P8_KEY_X;
-        state.KHeld |= P8_KEY_X;
-    }
+    // 3. 计算 KHeld (btn) 和 KDown (btnp)
+    // KHeld: 当前正按下的键
+    state.KHeld = currentHeld;
 
-    // --- 系统键 ---
-    // 菜单键 -> PICO-8 暂停/菜单 (Button 6)
-    if (device.isButtonPressed(CYBERPI_KEY_MENU)) {
-        state.KDown |= P8_KEY_PAUSE;
-        state.KHeld |= P8_KEY_PAUSE;
-    }
+    // KDown: 当前按下 且 上一帧未按下 (上升沿检测)
+    // 公式: Current & (~Last)
+    state.KDown = currentHeld & (~s_lastHeldState);
+
+    // 4. 保存当前状态供下一帧对比
+    s_lastHeldState = currentHeld;
 
     return state;
 }
-
-// BIOS 注入
-std::string Host::customBiosLua() { return ""; }

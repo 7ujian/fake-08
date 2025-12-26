@@ -3,6 +3,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_heap_caps.h"
+#include <new>
 #include "esp_log.h"
 #include "esp_timer.h"
 
@@ -17,6 +18,8 @@
 #include "PicoRam.h"
 #include "Cart.h"
 
+#include "embedded_carts.h"
+
 static const char* TAG = "Main";
 
 #define CHECK_ALLOC(ptr, name) \
@@ -24,6 +27,18 @@ static const char* TAG = "Main";
         printf("CRITICAL ERROR: Failed to allocate %s\n", name); \
         return; \
     }
+
+    #define NEW_IN_SRAM(TYPE, VAR, ...) \
+    void* raw_##VAR = heap_caps_malloc(sizeof(TYPE), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT); \
+    TYPE* VAR = nullptr; \
+    if (raw_##VAR) { \
+        printf("[%s] Allocating " #TYPE " in SRAM (%d bytes) at %p\n", TAG, sizeof(TYPE), raw_##VAR); \
+        VAR = new (raw_##VAR) TYPE(__VA_ARGS__); \
+    } else { \
+        printf("[%s] SRAM Full! Fallback " #TYPE " to default heap\n", TAG); \
+        VAR = new TYPE(__VA_ARGS__); \
+    } \
+    if (!VAR) { printf("[%s] Critical: Failed to allocate " #TYPE "\n", TAG); abort(); }
 
 // =============================================================
 // 硬件自检函数 (更新版)
@@ -96,80 +111,77 @@ extern "C" void app_main(void)
     // 确保你的 CyberPi::init() 里已经修复了 AW9523B 的输入方向配置 (Write 0xFF to Reg 0x04/0x05)
     CyberPi::getInstance().init();
     
-    // 2. 运行自检 (验证屏幕变色 + 按键响应)
-    run_hardware_selftest();
+   // 1. 创建 PicoRam (最关键的数据，64KB)
+    // 注意：PicoRam 的无参构造函数
+    NEW_IN_SRAM(PicoRam, memory);
+    memset(raw_memory, 0, sizeof(PicoRam)); // 确保清零
 
-    // 3. 内存分配
-    printf("[%s] Allocating PicoRam (64KB)...\n", TAG);
-    void* raw_mem = heap_caps_malloc(sizeof(PicoRam), MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
-    PicoRam* memory = nullptr;
-    if (raw_mem) {
-        memory = new (raw_mem) PicoRam(); 
-        memset(raw_mem, 0, sizeof(PicoRam));
-    } else {
-        memory = new PicoRam();
-    }
-    CHECK_ALLOC(memory, "PicoRam");
+    // 2. 创建 Host
+    // 假设 Host 无参构造
+    NEW_IN_SRAM(Host, host);
 
-    // 4. 创建 Host 并注入 Memory
-    Host* host = new Host();
-    CHECK_ALLOC(host, "Host");
+    // 3. 创建 Audio
+    // Audio 构造需要 memory 指针
+    NEW_IN_SRAM(Audio, audio, memory);
 
-    // 5. 创建 Audio
-    Audio* audio = new Audio(memory);
-    
-    // 6. 创建 VM
+    // 4. 创建 VM
+    // Vm 构造函数签名: Vm(Host* host, PicoRam* ram, uint8_t* bios, char* custom_gpu, Audio* audio)
     printf("[%s] Creating Virtual Machine...\n", TAG);
-    // Vm 内部会自动创建 Graphics 和 Input
-    // Input 内部会调用 Host::scanInput -> CyberPi::updateInputState
-    Vm* vm = new Vm(host, memory, nullptr, nullptr, audio);
-    CHECK_ALLOC(vm, "Vm");
+    NEW_IN_SRAM(Vm, vm, host, memory, nullptr, nullptr, audio);
 
     // 7. 平台设置
     host->oneTimeSetup(nullptr);
 
-    // 8. 生成测试卡带
-    printf("[%s] Generating Test Cart...\n", TAG);
-    Cart* testCart = new Cart();
+    // const unsigned char* cart_start = (const unsigned char*) bunnysurvivor_p8_start;
+    // const unsigned char* cart_end = (const unsigned char*) bunnysurvivor_p8_end;
+
+    // size_t cart_size = cart_end - cart_start;
+    // printf("Loading embedded cart, size: %d bytes\n", cart_size);
+
+    Cart* testCart = LoadEmbeddedCart(CartID::cpu_test_p8);
+
+    // // 8. 生成测试卡带
+    // printf("[%s] Generating Test Cart...\n", TAG);
+    // Cart* testCart = new Cart();
     
-    // Lua 测试脚本: 移动红点，变色背景
-    testCart->LuaString = R"(
-        x = 60
-        y = 60
-        col = 1
+    // // Lua 测试脚本: 移动红点，变色背景
+    // testCart->LuaString = R"(
+    //     x = 60
+    //     y = 60
+    //     col = 1
         
-        function _init()
-            cls(1)
-            print("INPUT TEST READY")
-        end
+    //     function _init()
+    //         cls(1)
+    //         print("INPUT TEST READY")
+    //     end
 
-        function _update()
-            -- Input Test
-            if (btn(0)) then x = x - 1 end -- Left
-            if (btn(1)) then x = x + 1 end -- Right
-            if (btn(2)) then y = y - 1 end -- Up
-            if (btn(3)) then y = y + 1 end -- Down
+    //     function _update()
+    //         -- Input Test
+    //         if (btn(0)) then x = x - 1 end -- Left
+    //         if (btn(1)) then x = x + 1 end -- Right
+    //         if (btn(2)) then y = y - 1 end -- Up
+    //         if (btn(3)) then y = y + 1 end -- Down
             
-            -- Button O (A) -> Red Background
-            if (btn(4)) then col = 8 end
-            -- Button X (B) -> Blue Background
-            if (btn(5)) then col = 12 end
-        end
+    //         -- Button O (A) -> Red Background
+    //         if (btn(4)) then col = 8 end
+    //         -- Button X (B) -> Blue Background
+    //         if (btn(5)) then col = 12 end
+    //     end
 
-        function _draw()
-            cls(col)
-            rectfill(x, y, x+8, y+8, 7) -- White box
-            print("X:"..x.." Y:"..y, 0, 0, 7)
+    //     function _draw()
+    //         cls(col)
+    //         rectfill(x, y, x+8, y+8, 7) -- White box
+    //         print("X:"..x.." Y:"..y, 0, 0, 7)
             
-            -- Visual feedback for buttons
-            if (btn(0)) print("LEFT", 0, 10, 6)
-            if (btn(1)) print("RIGHT", 40, 10, 6)
-            if (btn(2)) print("UP", 80, 10, 6)
-            if (btn(3)) print("DOWN", 0, 20, 6)
-            if (btn(4)) print("BTN O", 40, 20, 6)
-            if (btn(5)) print("BTN X", 80, 20, 6)
-        end
-    )";
+    //         -- Visual feedback for buttons
+    //         if (btn(0)) print("LEFT", 0, 10, 6)
+    //         if (btn(1)) print("RIGHT", 40, 10, 6)
+    //         if (btn(2)) print("UP", 80, 10, 6)
+    //         if (btn(3)) print("DOWN", 0, 20, 6)
+    //         if (btn(4)) print("BTN O", 40, 20, 6)
+    //         if (btn(5)) print("BTN X", 80, 20, 6)
+    //     end
+    // )";
 
     // 9. 加载卡带
     if (vm->loadCart(testCart)) {
