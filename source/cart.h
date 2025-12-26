@@ -42,6 +42,7 @@ class Cart {
     bool loadCartFromString(std::string cartStr);
 	
     public:
+    Cart();
     Cart (std::string filename, std::string cartDirectory);
     Cart (const unsigned char* cartData, size_t size);
     ~Cart();

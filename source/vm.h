@@ -54,7 +54,7 @@ class Vm {
 
     vector<string> _cartList;
 
-    bool loadCart(Cart* cart);
+
     void vm_reload(int destaddr, int sourceaddr, int len, Cart* cart);
 
 
@@ -71,6 +71,7 @@ class Vm {
     
     void LoadSettingsCart();
 
+    bool loadCart(Cart* cart);
     void LoadCart(string filename, bool loadBiosOnFail = true);
     void LoadCart(const unsigned char* cartData, size_t size, bool loadBiosOnFail = true);
 

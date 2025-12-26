@@ -431,6 +431,30 @@ Cart::Cart (const unsigned char* cartData, size_t size){
 
 }
 
+Cart::Cart() {
+    // 1. 彻底清空 ROM 数据区域
+    // CartRomData 是一个 union，清空 .data 数组就等于清空了 SpriteSheet, Map, Sfx 等所有内容
+    memset(CartRom.data, 0, sizeof(CartRom.data));
+
+    // 2. 清空 Lua 数据区域
+    // 你的 cart.h 里定义的是 uint8_t CartLuaData[32774];
+    memset(CartLuaData, 0, sizeof(CartLuaData));
+
+    // 3. 初始化其他字符串成员
+    FullCartPath = "memory_cart"; // 标记这是一个内存虚拟卡带
+    LoadError = "";
+    
+    LuaString = "";
+    SpriteSheetString = "";
+    SpriteFlagsString = "";
+    MapString = "";
+    SfxString = "";
+    MusicString = "";
+    LabelString = "";
+    
+    Logger_Write("Created empty Cart via default constructor\n");
+}
+
 //tac08 based cart parsing and stripping of emoji
 Cart::Cart(std::string filename, std::string cartDirectory){
     //the leading # indicates it is the BBS key. In the future, it would be nice to fetch them,
